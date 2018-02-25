@@ -173,7 +173,13 @@ impl<T: io::Read + io::Write> Xmodem<T> {
     /// byte was not `byte`, if the read byte was `CAN` and `byte` is not `CAN`,
     /// or if writing the `CAN` byte failed on byte mismatch.
     fn expect_byte_or_cancel(&mut self, byte: u8, msg: &'static str) -> io::Result<u8> {
-        let packet = self.read_byte()?;
+        let packet = match self.read_byte(true) {
+            Err(v) => {
+                self.write_byte(CAN)?;
+                return Err(v);
+                },
+            Ok(v) => v,
+        };
         if packet != byte {
             self.write_byte(CAN)?;
             Err(io::Error::new(io::ErrorKind::InvalidData, msg))
@@ -194,8 +200,10 @@ impl<T: io::Read + io::Write> Xmodem<T> {
     /// of `ConnectionAborted` is returned. Otherwise, the error kind is
     /// `InvalidData`.
     fn expect_byte(&mut self, byte: u8, expected: &'static str) -> io::Result<u8> {
-        let packet = self.read_byte()?;
-        if packet != byte {
+        let packet = self.read_byte(false)?;
+        if packet != byte && packet == CAN {
+            Err(io::Error::new(io::ErrorKind::ConnectionAborted, "CAN received and not expected"))
+        } else if packet != byte {
             Err(io::Error::new(io::ErrorKind::InvalidData, expected))
         } else {
             Ok(byte)
@@ -234,7 +242,7 @@ impl<T: io::Read + io::Write> Xmodem<T> {
             self.started = true;
         } 
 
-        match self.read_byte()? {
+        match self.read_byte(true)? {
             SOH => (),
             EOT => {
                 self.write_byte(NAK)?;
@@ -265,7 +273,7 @@ impl<T: io::Read + io::Write> Xmodem<T> {
             Ok(_) => (),
         }
         self.write_byte(ACK)?;
-        self.packet.wrapping_add(1);
+        self.packet = self.packet.wrapping_add(1);
         Ok(128)
     }
 
@@ -323,10 +331,11 @@ impl<T: io::Read + io::Write> Xmodem<T> {
             let cksum: u8 = buf.iter().fold(0u8, |acc, &x| x.wrapping_add(acc));
             self.write_byte(cksum)?;
 
-            match self.read_byte() {
+            match self.read_byte(true) {
                 Ok(ACK) => (),
                 v => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("sender received NAK ({:?}), retrying", v)))
             }
+            self.packet = self.packet.wrapping_add(1);
             Ok(128)
         } else {
             Err(io::Error::new(io::ErrorKind::UnexpectedEof, "write_packet buffer was an incorrect size"))
